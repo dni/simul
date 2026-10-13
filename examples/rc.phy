@@ -1,0 +1,27 @@
+# Charging a capacitor through a resistor. τ = R·C ≈ 1 ms.
+# Wiring:  V+ ──(in)── R ──(mid)── C ── gnd
+# Hardware: Pico GPIO as step source, ADC across C.
+
+rig bench_rc {
+  device pico_rc_1                     # this description is of that board, and only that board
+  source V  : voltage between in gnd range 0 V .. 3.3 V   accuracy 2 % + 20 mV
+  part   R  : resistor  10 kOhm ± 1 %  between in mid
+  part   C  : capacitor 100 nF  ± 10 % between mid gnd
+  sensor Vc : voltage across C range 0 V .. 3.3 V   accuracy 1 % + 15 mV
+}
+
+claim rc_charge on bench_rc {
+  step V from 0 V to 3.3 V
+  sample Vc every 20 us for 5 ms
+  # V_0 is the source level before the step. Writing V * (1 - exp(...)) instead would assume
+  # V_0 is exactly 0 V, which the source's ±20 mV accuracy does not guarantee.
+  law Vc == V + (V_0 - V) * exp(-t / (R * C))
+  against Vc == V                       # rival: no capacitance, voltage jumps instantly
+}
+
+# A false claim: the capacitor charges linearly at its initial rate.
+claim rc_linear on bench_rc {
+  step V from 0 V to 3.3 V
+  sample Vc every 20 us for 5 ms
+  law Vc == V * t / (R * C)
+}

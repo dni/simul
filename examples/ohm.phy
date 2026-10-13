@@ -1,0 +1,32 @@
+# Ohm's law on a 1 kΩ metal-film resistor.
+# Wiring:  V+ ──(top)── R ── gnd
+# Hardware: Pico + filtered PWM (buffered) as source, ADC across R, shunt-based current sense.
+
+rig bench_ohm {
+  source V  : voltage between top gnd range 0 V .. 3.3 V   accuracy 1 % + 10 mV
+  part   R  : resistor 1 kOhm ± 5 % between top gnd material metal_film
+  sensor Vr : voltage across R  range 0 V .. 3.3 V   accuracy 1 % + 15 mV
+  sensor Ir : current through R range 0 A .. 10 mA   accuracy 2 % + 20 uA
+  sensor Ta : temperature ambient range -10 °C .. 50 °C accuracy 0 % + 1 K
+  monitor Ta
+}
+
+# The resistor is linear: voltage proportional to current.
+claim ohms_law on bench_ohm {
+  sweep V from 0.2 V to 3.2 V steps 16
+  observe Vr, Ir
+  law Vr == R * Ir
+  against Vr == R * Ir * Ir / 1 mA     # rival: a square-law element
+}
+
+# A false claim: the resistor drops a fixed voltage regardless of current (like a diode).
+claim constant_drop on bench_ohm {
+  sweep V from 0.2 V to 3.2 V steps 16
+  observe Vr, Ir
+  law Vr == 0.7 V
+}
+
+experiment explore on bench_ohm {
+  sweep V from 0.2 V to 3.2 V steps 16
+  observe Vr, Ir
+}

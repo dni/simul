@@ -1,0 +1,39 @@
+# A copper coil heating itself. Ohm's law with a constant R should FAIL here,
+# and discovery should find why: resistance rises with temperature, and the coil
+# warms above ambient in proportion to the power it dissipates.
+# Wiring:  V+ ──(top)── Rw ── gnd     (Rw: ~10 Ω of thin magnet wire, wound on a former)
+# Hardware: power stage (op-amp + MOSFET) as source, INA226 for V and I,
+#           DS18B20 taped to the winding, BME280 for the room.
+
+rig bench_heat {
+  source V  : voltage between top gnd range 0 V .. 6 V        accuracy 0.5 % + 5 mV
+  part   Rw : resistor 10 Ohm ± 5 % between top gnd material copper
+  sensor Vr : voltage across Rw  range 0 V .. 36 V            accuracy 0.1 % + 2.5 mV
+  sensor Ir : current through Rw range 0 A .. 1 A             accuracy 0.5 % + 1 mA
+  sensor Tw : temperature at Rw  range -55 °C .. 125 °C       accuracy 0 % + 0.5 K
+  sensor Ta : temperature ambient range -10 °C .. 50 °C       accuracy 0 % + 1 K
+  sensor Pa : pressure ambient   range 30 kPa .. 110 kPa      accuracy 0 % + 100 Pa
+  sensor Hu : humidity ambient   range 0 .. 1                 accuracy 0 % + 0.03
+  monitor Tw, Ta, Pa, Hu
+}
+
+# Naive Ohm's law, fixed R within its 20 °C tolerance.
+claim ohm_naive on bench_heat {
+  sweep V from 0.5 V to 6 V steps 12 settle 120 s
+  observe Vr, Ir
+  law Vr == Rw * Ir
+}
+
+# Resistance of copper rises linearly with temperature.
+claim ohm_thermal on bench_heat {
+  param alpha : 1/K in 0.0035 .. 0.0043      # literature: 0.00393 /K for copper
+  sweep V from 0.5 V to 6 V steps 12 settle 120 s
+  observe Vr, Ir
+  law Vr == Rw * (1 + alpha * (Tw - 293.15 K)) * Ir
+  against Vr == Rw * Ir
+}
+
+experiment heat_explore on bench_heat {
+  sweep V from 0.5 V to 6 V steps 12 settle 120 s
+  observe Vr, Ir, Tw
+}

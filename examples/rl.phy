@@ -1,0 +1,42 @@
+# Self-induction and the coil's magnetic field. τ = L / (R + Rc) ≈ 1 ms.
+# Wiring:  V+ ──(in)── [coil: L + winding resistance Rc] ──(mid)── R ── gnd
+# The coil is modelled as an ideal inductor in series with its own wire resistance:
+# describing the hardware accurately means declaring that resistance, not ignoring it.
+# Hardware: Pico GPIO step through a MOSFET driver, ADC across R, Hall sensor inside the coil.
+
+rig bench_rl {
+  source V  : voltage between in gnd range 0 V .. 3.3 V   accuracy 2 % + 20 mV
+  part   L  : inductor 100 mH ± 10 % between in wind
+  part   Rc : resistor 4 Ohm   ± 25 % between wind mid material copper
+  part   R  : resistor 100 Ohm ± 1 %  between mid gnd
+  sensor Vr : voltage across R range 0 V .. 3.3 V        accuracy 1 % + 15 mV
+  sensor B  : magnetic_field at L range -20 mT .. 20 mT accuracy 2 % + 20 uT
+}
+
+# Current (seen as voltage across R) rises exponentially, settling at V·R/(R+Rc).
+claim self_induction on bench_rl {
+  step V from 0 V to 3.3 V
+  sample Vr every 20 us for 6 ms
+  law Vr == R / (R + Rc) * (V + (V_0 - V) * exp(-t * (R + Rc) / L))
+  against Vr == R / (R + Rc) * V        # rival: no induction, current jumps instantly
+}
+
+# The field inside the coil is proportional to the current through it.
+claim field_follows_current on bench_rl {
+  param k  : T/A in 0.005 .. 0.02       # field per ampere: the claim is that one exists
+  param B0 : mT  in -1 .. 1             # background field along the sensor axis (earth, magnets nearby)
+  sweep V from 0.3 V to 3.3 V steps 8
+  observe Vr, B
+  law B == k * Vr / R + B0
+}
+
+# Discovery: no law given. `simul discover` proposes one from the data.
+experiment ring_up on bench_rl {
+  step V from 0 V to 3.3 V
+  sample Vr every 20 us for 6 ms
+}
+
+experiment field_sweep on bench_rl {
+  sweep V from 0.3 V to 3.3 V steps 10
+  observe Vr, B
+}
