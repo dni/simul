@@ -31,20 +31,22 @@ exist. INCONCLUSIVE when a rival fits too: the rig cannot tell them apart.
 Method:
 1. Explore: run `experiment` blocks via discover() to get data and candidate laws. Vary what the rigs let you vary \
 (source range, step vs sweep, sample rate, duration).
-2. Never trust a fit to the data it came from. Certify every law with run() on a NEW claim, which takes fresh data.
-3. Make claims strong: narrow param ranges, and an `against` rival you actually believe someone might hold.
-4. A constant the rig description cannot explain is the interesting part: new physics, or something the hardware \
+2. When two laws compete, call design() before spending runs: it says whether ANY experiment on this rig can \
+tell them apart, gives the cheapest one that can, and otherwise names the hardware upgrade that would.
+3. Never trust a fit to the data it came from. Certify every law with run() on a NEW claim, which takes fresh data.
+4. Make claims strong: narrow param ranges, and an `against` rival you actually believe someone might hold.
+5. A constant the rig description cannot explain is the interesting part: new physics, or something the hardware \
 description is missing. Form a hypothesis about what it is and test it with a different experiment.
-5. If the instruments are too coarse to decide something, say exactly which instrument and what precision would decide it.
+6. If the instruments are too coarse to decide something, say exactly which instrument and what precision would decide it.
 
-Each hardware run (run or discover) costs one unit of a limited budget; check() is free, so check before running.
+Each hardware run (run or discover) costs one unit of a limited budget; check() and design() are free, so use them before running.
 
 When done, write a final report: certified laws (with notebook entry numbers), refuted ideas, unexplained constants \
 and your best hypothesis for each, and concrete hardware changes that would let the next round decide more.
 
 Simul language reference:
 {lang.__doc__}
-Laws use + - * / ^ (integer exponents), exp(), ln(), sqrt(), names from the rig, params, `t` (step experiments) and \
+Laws use + - * / ^ (integer exponents), exp(), ln(), sqrt(), sin(), cos(), names from the rig, params, `t` (step experiments) and \
 `<source>_0` (level before the step). Quantities need units: 3.3 V, 20 us, 10 kOhm, 293.15 K. Write temperatures \
 in laws in K.
 """
@@ -102,6 +104,27 @@ TOOLS = [
         "strict": True,
     },
     {
+        "name": "design",
+        "description": "Plan the experiment that decides a claim against its `against` rivals. Free: no hardware run. "
+                       "Reports the separation S per rival (S > 1: every possible outcome refutes at least one of the "
+                       "two laws), the cheapest decisive procedure with a rewritten claim ready to run(), or, if no "
+                       "experiment on this rig is decisive, which tolerances/accuracies would have to improve. Laws "
+                       "must have the form `<sensor> == <expression>`. Readings the laws need but an experiment does "
+                       "not set (e.g. a temperature) are taken from a pilot run in the notebook.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "source": {"type": "string", "description": "Simul text containing the claim (law + against)."},
+                "name": {"type": "string", "description": "The claim to design for."},
+                "pilot_entry": {"type": "integer", "description": "Notebook entry to take other readings from "
+                                                                  "(default: latest suitable)."},
+            },
+            "required": ["source", "name"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
         "name": "notebook",
         "description": "List past runs in the lab notebook (all sessions, humans and agents): verdicts, witnesses, reasons.",
         "input_schema": {
@@ -131,6 +154,8 @@ class Session:
             return json.dumps(notebook.summary(self.lab.notebook, args.get("limit") or 30))
         if name == "check":
             return f"ok: {', '.join(self.lab.check(args['source']))}"
+        if name == "design":
+            return json.dumps(self.lab.design(args["source"], args["name"], args.get("pilot_entry")))
         if self.budget <= 0:
             raise SimulError("experiment budget exhausted: write your final report now")
         self.budget -= 1

@@ -28,7 +28,7 @@ import json
 from dataclasses import dataclass
 
 from .backends import Backend
-from .check import check_claim, evaluate, existentials, observed
+from .check import check_claim, compile_expr, evaluate, existentials, free_vars, observed
 from .lang import Claim, Law, Program, Rig, SimulError, Step, Sweep, parse
 
 CERT_VERSION = 1
@@ -130,6 +130,36 @@ def check_witness(law: Law, claim: Claim, rig: Rig, rows: list[dict[str, float]]
     return Fit(worst, witness, worst_i)
 
 
+def _fast_ratio(law: Law, rig: Rig, rows: list[dict[str, float]]):
+    """Same arithmetic as row_ratio, compiled: for the search only. The result is re-checked by check_witness."""
+    lhs, rhs = compile_expr(law.lhs), compile_expr(law.rhs)
+    g = lambda env: lhs(env) - rhs(env)
+    used = free_vars(law.lhs) | free_vars(law.rhs)
+    us = [[(n, u) for n, u in uncertainties(rig, r).items() if u and n in used] for r in rows]
+
+    def worst(witness: dict[str, float]) -> tuple[float, int]:
+        w, wi = 0.0, 0
+        for i, (row, u) in enumerate(zip(rows, us)):
+            env = {**row, **witness}
+            try:
+                a, b = lhs(env), rhs(env)
+                bound = law.slack * max(abs(a), abs(b))
+                for name, ux in u:
+                    h = max(abs(row[name]) * 1e-6, 1e-15)
+                    hi, lo = dict(env), dict(env)
+                    hi[name] += h
+                    lo[name] -= h
+                    bound += abs((g(hi) - g(lo)) / (2 * h)) * ux
+                resid = abs(a - b)
+                r = (0.0 if resid == 0 else float("inf")) if bound == 0 else resid / bound
+            except (ArithmeticError, ValueError):
+                r = float("inf")
+            if r > w:
+                w, wi = r, i
+        return w, wi
+    return worst
+
+
 def search_witness(law: Law, claim: Claim, rig: Rig, rows: list[dict[str, float]], grid: int = 7, rounds: int = 8) -> Fit:
     """Untrusted search: zooming grid over the tolerance box, minimizing the worst ratio.
 
@@ -140,17 +170,21 @@ def search_witness(law: Law, claim: Claim, rig: Rig, rows: list[dict[str, float]
     bounds = existentials(law, claim, rig)
     names = list(bounds)
     box = {n: (lo, hi) for n, (lo, hi, _) in bounds.items()}
-    best = check_witness(law, claim, rig, rows, {n: g for n, (_, _, g) in bounds.items()})
+    fast = _fast_ratio(law, rig, rows)
+    start = {n: g for n, (_, _, g) in bounds.items()}
+    ratio, wi = fast(start)
+    best = Fit(ratio, start, wi)
     if not names:
-        return best
+        return check_witness(law, claim, rig, rows, best.witness)
     if len(names) > 3:
         grid = 5
     for _ in range(rounds):
         axes = [[lo + (hi - lo) * k / (grid - 1) for k in range(grid)] for lo, hi in box.values()]
         for point in itertools.product(*axes):
-            fit = check_witness(law, claim, rig, rows, dict(zip(names, point)))
-            if fit.ratio < best.ratio:
-                best = fit
+            w = dict(zip(names, point))
+            ratio, wi = fast(w)
+            if ratio < best.ratio:
+                best = Fit(ratio, w, wi)
         if best.consistent:
             break
         for n in names:  # zoom in around the best point, staying inside tolerance
@@ -158,7 +192,7 @@ def search_witness(law: Law, claim: Claim, rig: Rig, rows: list[dict[str, float]
             half = (hi - lo) * 0.3
             plo, phi, _ = bounds[n]
             box[n] = (max(plo, best.witness[n] - half), min(phi, best.witness[n] + half))
-    return best
+    return check_witness(law, claim, rig, rows, best.witness)  # the trusted check has the last word
 
 
 def verdict(claim: Claim, rig: Rig, rows: list[dict[str, float]]) -> dict:

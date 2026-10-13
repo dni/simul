@@ -1,4 +1,4 @@
-"""simul check | prove | discover | recheck | notebook | agent"""
+"""simul check | prove | discover | design | recheck | notebook | describe | agent | bench"""
 from __future__ import annotations
 
 import argparse
@@ -38,6 +38,23 @@ def show(name: str, cert: dict) -> None:
         print(f"{'':13}against #{i + 1}: {'consistent' if a['consistent'] else 'excluded'} ({a['ratio']:.2f}× bound)")
 
 
+def show_design(d: dict) -> None:
+    sep = lambda xs: ", ".join(f"{x:.3g}" for x in xs)
+    if d["current"]:
+        print(f"as written: separation {sep(d['current']['separation'])} "
+              f"({'decisive' if d['current']['decisive'] else 'NOT decisive: both laws could survive'})")
+    for i, r in enumerate(d["rivals"], 1):
+        print(f"  rival #{i}: {r}")
+    if not d["decisive"]:
+        print(f"no experiment of this kind on this rig is decisive (best separation {sep(d['best_possible']['separation'])}).")
+        print("would decide it:")
+        for u in d["upgrades"]:
+            print(f"  - {u['text']}")
+        return
+    print(f"cheapest decisive experiment (separation {sep(d['separation'])}, they differ most at "
+          f"{'; '.join(d['differ_most_at'])}):\n{d['claim_text']}")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="simul", description="Verify and discover physical laws on specified hardware.")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -59,6 +76,17 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("experiment")
     d.add_argument("--verify", type=int, default=0, metavar="N", help="prove the top N candidates on a fresh run")
     lab_args(d)
+    dz = sub.add_parser("design", help="plan the cheapest experiment that decides a claim against its rivals (no run)")
+    dz.add_argument("file")
+    dz.add_argument("claim")
+    dz.add_argument("--pilot", metavar="EXPERIMENT", help="run this experiment first for readings the laws need")
+    lab_args(dz)
+    b = sub.add_parser("bench", help="hidden-physics benchmark: how many unstated effects does a solver certify?")
+    b.add_argument("--solver", default="baseline", choices=["baseline", "agent"])
+    b.add_argument("--scenario", action="append", help="run only these (default: all)")
+    b.add_argument("--budget", type=int, default=12)
+    b.add_argument("--seed", type=int, default=0)
+    b.add_argument("--list", action="store_true", help="list scenarios (with answers) and exit")
     r = sub.add_parser("recheck", help="re-verify a certificate offline")
     r.add_argument("cert")
     n = sub.add_parser("notebook", help="list past runs")
@@ -102,6 +130,14 @@ def main(argv: list[str] | None = None) -> int:
             check_program(prog)
             print(f"ok: {len(prog.rigs)} rig(s), {len(prog.claims)} claim(s)/experiment(s) well-formed")
             return 0
+        if args.cmd == "bench":
+            from . import bench
+            if args.list:
+                for sc in bench.SCENARIOS:
+                    print(f"{sc.name:<16} {sc.rig_file:<9} {', '.join(sc.effects):<34} {sc.answer}")
+                return 0
+            bench.run(args.solver, args.scenario, args.budget, args.seed)
+            return 0
         if args.cmd == "agent":
             from .agent import run_agent
             lab = Lab(args.rigs, args.backend, args.notebook, parse_truth(args.truth))
@@ -119,6 +155,15 @@ def main(argv: list[str] | None = None) -> int:
                 with open(args.out, "w", encoding="utf-8") as f:
                     f.write(dumps(certs[0] if len(certs) == 1 else certs))
                 print(f"certificate written to {args.out}")
+            return 0
+
+        if args.cmd == "design":
+            entry = None
+            if args.pilot:
+                pilot = lab.run("", args.pilot, by="cli", why=f"pilot for designing {args.claim}")
+                show(args.pilot, pilot)
+                entry = pilot["entry"]
+            show_design(lab.design("", args.claim, entry))
             return 0
 
         # discover

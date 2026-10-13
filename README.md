@@ -41,6 +41,8 @@ the source file, so the statement is exactly as strong as what it says.
 ```sh
 python3 -m simul discover examples/heat.phy heat_explore --verify 3   # derive laws, certify top 3 on fresh data
 python3 -m simul prove examples/heat.phy        # naive Ohm REFUTED on a self-heating coil, R(T) CONFIRMED
+python3 -m simul design examples/heat.phy ohm_thermal --pilot heat_explore   # cheapest decisive experiment
+python3 -m simul bench                          # hidden-physics benchmark (scripted baseline)
 python3 -m simul notebook                       # everything that ever ran, with who and why
 python3 -m simul describe sim:examples/rl.phy:bench_rl   # device self-description -> rig skeleton
 pip install anthropic && python3 -m simul agent examples/heat.phy --budget 12   # Claude runs the lab
@@ -59,6 +61,53 @@ What discovery finds on the examples, from raw data alone:
 
 Constants the rig cannot explain are the interesting output: either new physics, or something
 the hardware description is missing.
+
+## Choosing the experiment that decides
+
+Adam chose experiments to separate its hypotheses. `simul design` does that for any claim with
+`against` rivals, without touching hardware. Two laws can both survive an experiment if some
+data could fit both, so an experiment's *separation* is
+
+```
+S = min over witnesses (each law its own, as the kernel allows)  max over rows  |f − g| / (U_f + U_g)
+```
+
+S > 1 means every possible outcome refutes at least one of the two laws. Readings an experiment
+cannot set (a temperature, a current) come from a pilot run in the notebook and are never
+extrapolated.
+
+| claim | what design says |
+|---|---|
+| copper coil: R(T) vs plain Ohm | 2 points incl. 6 V decide it: 4 min instead of 24 |
+| RC: charging vs no capacitance | one sample right after the edge decides it |
+| RL: τ = L/(R+Rc) vs τ = L/R | **no experiment on this rig can**: L's ±10 % lets one impersonate the other. It names the upgrades that would (measure L, R, Rc on a calibration rig; better source and ADC) |
+
+The last row is the useful kind of answer: it says what to build next. The search is untrusted;
+the kernel's verdict on the real run is what counts.
+
+## Benchmark: how much does the AI scientist find?
+
+`simul bench` runs a solver against rigs whose simulator has physics the rig never states, and
+the solver sees only the rig blocks (no example claims, no comments). Scoring needs no judge: a
+certified claim *detects* a hidden effect if, on a fresh simulator with the same seed, it is
+CONFIRMED with the effect on and REFUTED with it off. A sentence in a report scores nothing.
+
+| scenario | hidden | baseline |
+|---|---|---|
+| rl_background | 150 µT background field | ✓ |
+| heat_joule | self-heating | ✓ |
+| rc_leak | capacitor leaking through 100 kΩ | ✓ |
+| ohm_offset | source outputs 60 mV extra | ✓ |
+| ohm_nonlinear | current sensor up to 16 % high (quadratic) | ✓ |
+| rc_hum | 150 mV of 50 Hz pickup | ✗ (pushes readings out of range; needs a sine law) |
+| rc_leak_hum | leak + hum | 1/2 (the leak's constant absorbs the hum) |
+| rl_field_sensor | background + nonlinear Hall sensor | 1/2 |
+| heat_offset | self-heating + source offset | 2/2 |
+
+The scripted baseline (explore with the human-written procedures, discover, certify every
+candidate) scores **9/12** with a budget of 12 runs. `simul bench --solver agent` puts Claude in
+its place. Every scenario is solvable: for instance, a claim with `a * sin(314.159 Hz * t + phi)`
+stepping to 2.5 V over 40 ms detects the hum.
 
 ## Describing hardware exactly
 
@@ -110,7 +159,7 @@ pass over the data, the same split as proof search vs. proof checking in Lean. C
 ## The AI scientist
 
 `simul agent` gives Claude (`claude-opus-5-5`) the same tools a human has: `describe_hardware`,
-`check` (free), `run` and `discover` (one budget unit each), and `notebook`. It is told to explore,
+`check` and `design` (free), `run` and `discover` (one budget unit each), and `notebook`. It is told to explore,
 never trust a fit on the data it came from, make claims strong, chase unexplained constants, and
 say which instrument upgrade would decide what it could not. The trust boundary is built into
 `Lab`: the agent cannot declare or alter rigs, every run is logged, and only the kernel issues
@@ -123,7 +172,9 @@ verdicts. Refusals fall back to another model server-side (`fallbacks: "default"
 | `simul/lang.py`, `check.py`, `units.py` | language, static checks, units (SI + °C) |
 | `simul/kernel.py` | experiments, witness search and check, verdicts, certificates |
 | `simul/discover.py` | law discovery and explanation from the rig |
-| `simul/backends.py` | netlist simulator (MNA plus hidden physics), serial driver |
+| `simul/design.py` | experiment design: separation of rival laws, upgrade advice |
+| `simul/bench.py` | hidden-physics scenarios, counterfactual scoring, baseline solver |
+| `simul/backends.py` | netlist simulator (MNA plus switchable hidden effects), serial driver |
 | `simul/lab.py`, `notebook.py` | sessions, one device connection per rig, append-only notebook |
 | `simul/agent.py` | Claude as experimentalist |
 | `firmware/pico/main.py`, `PROTOCOL.md` | device side (untested on hardware) |
@@ -133,8 +184,13 @@ verdicts. Refusals fall back to another model server-side (`fallbacks: "default"
 - **REFUTED is not yet sound.** It means "grid search found no witness". Interval branch-and-bound
   over the parameter box would make it a proof.
 - **Discovery's model space is small:** two-term linear-in-coefficient models and single
-  exponentials. Next steps are products of exponentials (RLC), sinusoids (AC), power laws with
+  exponentials. Laws may use `sin`/`cos`, but discovery does not propose them yet. Next steps are
+  sums of a transient and a sinusoid (hum), products of exponentials (RLC), power laws with
   fitted exponents, and agent-proposed model families.
+- **Run the benchmark with the agent** and compare to the baseline's 9/12; then use it to tune
+  the agent's prompt and tools. Add a run-time cost (settle times) to the budget, not just a count.
+- **Design is greedy about cost** (steps × settle, or duration) and does not model device limits
+  such as the maximum sample rate.
 - **Calibration certificates** (claims on a reference rig) should produce the accuracy figures.
 - **Switch matrices** (`switch` elements) so the agent can change the circuit, not just the drive.
 - **Timing uncertainty** is not modelled; `t` is treated as exact.

@@ -37,6 +37,19 @@ MATERIALS = {
 FIELD_PER_AMP = 0.0126  # T/A inside the coil: μ0·n for 1000 turns over 10 cm
 EARTH_FIELD = 48e-6  # T, along the sensor axis
 
+# Physics the rig files never state. Each effect can be switched on or off, which is what lets the
+# benchmark (bench.py) score a discovery by asking: would this claim still hold without the effect?
+EFFECTS = {
+    "self_heating": "resistors warm by power x thermal resistance of their material (value: scale)",
+    "earth_field": "a constant background field at every field sensor (value: T)",
+    "leaky_capacitor": "every capacitor has a parallel leakage resistance (value: Ohm)",
+    "source_offset": "every voltage source outputs this much more than commanded (value: V)",
+    "nonlinear_sensor": "one sensor reads x * (1 + k * x / full scale) (value: [sensor, k])",
+    "mains_hum": "50 Hz pickup on voltage sensors during fast sampling (value: amplitude V)",
+}
+DEFAULT_EFFECTS = {"self_heating": 1.0, "earth_field": EARTH_FIELD}
+HUM_HZ, HUM_PHASE = 50.0, 0.7
+
 
 class Backend(Protocol):
     def hello(self) -> dict: ...
@@ -70,8 +83,8 @@ class Circuit:
     """MNA over the rig's netlist. Unknowns: node voltages, then currents of
     voltage sources and inductors (positive from their first node to their second, through the element)."""
 
-    def __init__(self, rig: Rig, values: dict[str, float]):
-        self.rig, self.values = rig, values
+    def __init__(self, rig: Rig, values: dict[str, float], leak: float | None = None):
+        self.rig, self.values, self.leak = rig, values, leak
         nodes = {n for el in [*rig.parts.values(), *rig.sources.values()] for n in el.nodes} - {GROUND}
         self.idx = {n: i for i, n in enumerate(sorted(nodes))}
         branch = [s.name for s in rig.sources.values() if s.kind == "voltage"]
@@ -112,9 +125,12 @@ class Circuit:
             v = self.values[p.name]
             if p.kind == "resistor":
                 stamp_g(a, b, 1 / v)
-            elif p.kind == "capacitor" and h is not None:
-                stamp_g(a, b, v / h)
-                inject(a, b, v / h * prev["v"][p.name])
+            elif p.kind == "capacitor":
+                if self.leak:
+                    stamp_g(a, b, 1 / self.leak)
+                if h is not None:
+                    stamp_g(a, b, v / h)
+                    inject(a, b, v / h * prev["v"][p.name])
             elif p.kind == "inductor":
                 k = stamp_branch(p.name, a, b)
                 if h is not None:
@@ -149,8 +165,13 @@ class Circuit:
 
 
 class SimBackend:
-    def __init__(self, rig: Rig, seed: int = 0, truth: dict[str, float] | None = None):
+    def __init__(self, rig: Rig, seed: int = 0, truth: dict[str, float] | None = None,
+                 effects: dict | None = None):
         self.rig = rig
+        self.fx = dict(DEFAULT_EFFECTS if effects is None else effects)
+        unknown = set(self.fx) - set(EFFECTS)
+        if unknown:
+            raise ValueError(f"unknown effects {sorted(unknown)} (known: {', '.join(EFFECTS)})")
         rng = random.Random(seed)
         # Actual part values at 20 °C: somewhere inside tolerance unless overridden.
         self.nominal = {p.name: p.nominal * (1 + rng.uniform(-1, 1) * p.tol) for p in rig.parts.values()}
@@ -179,15 +200,22 @@ class SimBackend:
             out[p.name] = self.nominal[p.name] * (1 + alpha * (self.temp[p.name] - T_REF))
         return out
 
+    def _circuit(self) -> Circuit:
+        return Circuit(self.rig, self._values(), self.fx.get("leaky_capacitor"))
+
     def _actual_drive(self, cmd: dict[str, float]) -> dict[str, float]:
-        return {s: self._err(s, v) for s, v in cmd.items()}
+        return {s: self._source(s, v) for s, v in cmd.items()}
+
+    def _source(self, s: str, v: float) -> float:
+        offset = self.fx.get("source_offset", 0.0) if self.rig.sources[s].kind == "voltage" else 0.0
+        return self._err(s, v) + offset
 
     def _thermal_equilibrium(self, drive):
         """Iterate electrical <-> thermal coupling to the steady state."""
         for _ in range(30):
-            sol = Circuit(self.rig, self._values()).run(drive, None, None)
+            sol = self._circuit().run(drive, None, None)
             for p in self.rig.parts.values():
-                rth = MATERIALS.get(p.material or "metal_film", MATERIALS["metal_film"])[1]
+                rth = MATERIALS.get(p.material or "metal_film", MATERIALS["metal_film"])[1] * self.fx.get("self_heating", 0.0)
                 power = abs(sol["v"][p.name] * sol["i"][p.name]) if p.kind == "resistor" else 0.0
                 self.temp[p.name] = self.ambient + power * rth
         return sol
@@ -204,12 +232,22 @@ class SimBackend:
             if s.kind == "magnetic_field":
                 coil = self.rig.parts.get(s.target)
                 inside = FIELD_PER_AMP * sol["i"][s.target] if coil and coil.kind == "inductor" else 0.0
-                return inside + EARTH_FIELD
+                return inside + self.fx.get("earth_field", 0.0)
         # ambient
-        return {"temperature": self.ambient, "magnetic_field": EARTH_FIELD,
+        return {"temperature": self.ambient, "magnetic_field": self.fx.get("earth_field", 0.0),
                 "pressure": 101_325.0, "humidity": 0.45}.get(s.kind, 0.0)
 
     # -- instruments
+    def _sense(self, ch: str, sol: dict, t: float | None = None) -> float:
+        """What sensor `ch` reads: the quantity, any hidden instrument effects, then its in-spec error."""
+        x = self._quantity(ch, sol)
+        s = self.rig.sensors[ch]
+        if "nonlinear_sensor" in self.fx and self.fx["nonlinear_sensor"][0] == ch:
+            x *= 1 + self.fx["nonlinear_sensor"][1] * x / max(abs(s.lo), abs(s.hi))
+        if t is not None and s.kind == "voltage" and "mains_hum" in self.fx:
+            x += self.fx["mains_hum"] * math.sin(2 * math.pi * HUM_HZ * t + HUM_PHASE)
+        return self._err(ch, x)
+
     def _err(self, name: str, true: float) -> float:
         gain, offset = self.err[name]
         acc = (self.rig.sources | self.rig.sensors)[name].acc
@@ -237,7 +275,7 @@ class SimBackend:
     def read(self, chs: list[str], n: int = 16) -> dict[str, float]:
         self._drift()
         sol = self._thermal_equilibrium(self._actual_drive(self.cmd))
-        reads = [{c: self._err(c, self._quantity(c, sol)) for c in chs} for _ in range(n)]
+        reads = [{c: self._sense(c, sol) for c in chs} for _ in range(n)]  # averaging removes hum
         return {c: sum(r[c] for r in reads) / n for c in chs}
 
     def step(self, ch, lo, hi, chs, dt, n):
@@ -246,8 +284,8 @@ class SimBackend:
         before = self._actual_drive(self.cmd)
         sol = self._thermal_equilibrium(before)  # settled at `lo`
         self.cmd[ch] = hi
-        after = {**before, ch: self._err(ch, hi)}
-        circuit = Circuit(self.rig, self._values())  # thermal time constants >> electrical: hold temperatures
+        after = {**before, ch: self._source(ch, hi)}
+        circuit = self._circuit()  # thermal time constants >> electrical: hold temperatures
         sub = 20
         h = dt / sub
         out = {"t": [], **{c: [] for c in chs}}
@@ -259,7 +297,7 @@ class SimBackend:
                 sol = circuit.run(after, 1e-12 * dt, sol)  # the instant after the edge
             out["t"].append(k * dt)
             for c in chs:
-                out[c].append(self._err(c, self._quantity(c, sol)))
+                out[c].append(self._sense(c, sol, k * dt))
         return out
 
 
@@ -298,11 +336,11 @@ class SerialBackend:
         return self._call(op="step", ch=ch, lo=lo, hi=hi, sample=chs, dt=dt, n=n)["data"]
 
 
-def open_backend(spec: str, rig: Rig, truth: dict[str, float] | None = None) -> Backend:
+def open_backend(spec: str, rig: Rig, truth: dict[str, float] | None = None, effects: dict | None = None) -> Backend:
     """'sim', 'sim:<seed>' or 'serial:<port>'."""
     kind, _, arg = spec.partition(":")
     if kind == "sim":
-        return SimBackend(rig, seed=int(arg or 0), truth=truth)
+        return SimBackend(rig, seed=int(arg or 0), truth=truth, effects=effects)
     if kind == "serial":
         return SerialBackend(arg)
     raise ValueError(f"unknown backend {spec!r}")

@@ -4,8 +4,11 @@ import tempfile
 import unittest
 
 from simul import SimulError, parse
+from simul import notebook
 from simul.backends import Circuit, SimBackend
+from simul.bench import detects
 from simul.check import check_claim, check_program
+from simul.design import design
 from simul.discover import discover
 from simul.kernel import prove, recheck, run_experiment
 from simul.lab import Lab
@@ -150,6 +153,78 @@ class Discovery(unittest.TestCase):
             cert = lab.run(text, text.split()[1])
             self.assertEqual(cert["verdict"], "CONFIRMED")
             self.assertEqual(cert["entry"], 2)
+
+
+RL_TAU = """
+claim tau_rivals on bench_rl {
+  step V from 0 V to 3.3 V
+  sample Vr every 20 us for 6 ms
+  law Vr == R / (R + Rc) * (V + (V_0 - V) * exp(-t * (R + Rc) / L))
+  against Vr == R / (R + Rc) * (V + (V_0 - V) * exp(-t * R / L))
+}
+"""
+
+
+class Design(unittest.TestCase):
+    def test_cheapest_decisive_experiment_is_found_and_confirms(self):
+        with tempfile.TemporaryDirectory() as d:
+            lab = Lab([str(EXAMPLES / "heat.phy")], notebook_path=f"{d}/nb.jsonl")
+            lab.run("", "heat_explore")  # pilot: the laws mention Tw and Ir, which no experiment sets
+            plan = lab.design("", "ohm_thermal")
+            self.assertTrue(plan["decisive"])
+            self.assertIn("steps 2 ", plan["procedure"])  # two points instead of twelve
+            self.assertIn("to 6 V", plan["procedure"])  # where heating makes the laws differ most
+            cert = lab.run(plan["claim_text"], "ohm_thermal_d")
+            self.assertEqual(cert["verdict"], "CONFIRMED")
+
+    def test_undecidable_rivals_get_upgrade_advice(self):
+        src = (EXAMPLES / "rl.phy").read_text() + RL_TAU
+        prog = parse(src)
+        plan = design(prog.claims["tau_rivals"], prog.rigs["bench_rl"], src)
+        self.assertFalse(plan["decisive"])  # L's ±10 % lets L/R impersonate L/(R+Rc)
+        self.assertIn("L", plan["upgrades"][0]["item"].split("+"))
+
+    def test_needs_pilot_for_unset_readings(self):
+        src = (EXAMPLES / "heat.phy").read_text()
+        prog = parse(src)
+        with self.assertRaises(SimulError):
+            design(prog.claims["ohm_thermal"], prog.rigs["bench_heat"], src)
+
+
+LEAK = """claim leak on bench_rc {
+  param Rl : kOhm in 85 .. 115
+  step V from 0 V to 3.3 V
+  sample Vc every 20 us for 5 ms
+  law Vc == Rl / (R + Rl) * (V + (V_0 - V) * exp(-t * (R + Rl) / (R * Rl * C)))
+}"""
+
+
+class HiddenPhysics(unittest.TestCase):
+    def test_blind_lab_shows_only_rig_blocks(self):
+        lab = Lab([str(EXAMPLES / "heat.phy")], blind=True)
+        self.assertNotIn("claim", lab.rigs())
+        self.assertNotIn("#", lab.rigs())
+        self.assertEqual(lab.rigs().count("rig "), 1)
+
+    def test_counterfactual_scoring(self):
+        fx = {"leaky_capacitor": 100e3}
+        with tempfile.TemporaryDirectory() as d:
+            lab = Lab([str(EXAMPLES / "rc.phy")], notebook_path=f"{d}/nb.jsonl", effects=fx, blind=True)
+            self.assertEqual(lab.run(LEAK, "leak")["verdict"], "CONFIRMED")
+            textbook = (EXAMPLES / "rc.phy").read_text().split("claim rc_charge", 1)[1].split("}", 1)[0]
+            lab.run("claim rc_charge" + textbook.replace("against Vc == V", "") + "}", "rc_charge")
+            leak, plain = notebook.entries(lab.notebook)
+            self.assertTrue(detects(leak, fx, "leaky_capacitor", 0))  # true only because of the leak
+            self.assertFalse(detects(plain, fx, "leaky_capacitor", 0))
+
+    def test_unknown_effect_rejected(self):
+        with self.assertRaises(ValueError):
+            SimBackend(parse(RIG).rigs["b"], effects={"gremlins": 1})
+
+    def test_effects_off_means_ideal_physics(self):
+        prog = parse((EXAMPLES / "heat.phy").read_text())
+        cert = prove(prog, "ohm_naive", SimBackend(prog.rigs["bench_heat"], effects={}))
+        self.assertEqual(cert["verdict"], "CONFIRMED")  # no self-heating: plain Ohm's law holds
 
 
 class LabBoundary(unittest.TestCase):
